@@ -1,55 +1,54 @@
 import express from 'express';
-import ffmpeg from 'fluent-ffmpeg';
+
+import { cleanUp, convertVideo, downloadRawVideo, setUpDirecotries, uploadProcessedVideo } from './storage';
+
+//Setting up directories
+setUpDirecotries();
 
 const app = express();
 //Tell express to use json as body parser
 app.use(express.json())
 
 
-app.post('/process-video', (req, res) => {
-    //Getting path of input video
-    const inputFilePath = req.body.inputFilePath;
-    //Getting path of output video
-    const outputFilePath = req.body.outputFilePath;
+app.post('/process-video', async(req, res) => {
 
-    //checking if input and output file paths are provided
-    if (!inputFilePath || !outputFilePath) {
-        let missingFiles = [];
-        if (!inputFilePath){
-            missingFiles.push( "Input File Path");
-        }
-        if (!outputFilePath){
-            missingFiles.push("Output File Path");
-        }
+    //Getting the bucket and filename from cloud pub/sub message
+    let data;
+    try{
+        const message = Buffer.from(req.body.message.data, 'base64').toString("utf8");
+        data = JSON.parse(message);
 
-        let missingFilesStr = missingFiles.join(" and ");
-        res.status(400).send({
-            error: `Bad Request`,
-            message: `Missing ${missingFilesStr}`
-        });
+        if (!data.name){
+            throw new Error("Invalid message payload received");
+        }
+    } catch (err){
+        console.error(err);
+        return res.status(400).send("Bad Request: missing filename.");
     }
 
+    const inputFileName = data.name;
+    const outputFileName = `processed-${inputFileName}`;
 
-    //Creating ffmpeg command
-    ffmpeg(inputFilePath)
-        .outputOptions("-vf","scale = -1:360p") //setting output video resolution to 360p
-        .on('end', () => {      //when processing is finished
-            console.log('Processing finished !');
-            res.status(200).send({
-                message: `Processing finished !`
-            });
-        })
-        .on('error', (err) => { //when processing is finished with error
-            console.log(`Error ${err.message}`);
-            res.status(500).send({
-                error: `Internal Server Error`,
-                message: `Error: ${err.message}`
-            });
-        })
-        .save(outputFilePath); //saving output video to output file path
+    //Download the raw video from the bucket
+    await downloadRawVideo(inputFileName)
+
+    //converting the video
+    try{
+        await convertVideo(inputFileName, outputFileName);
+    } catch(err){
+        await cleanUp(inputFileName, outputFileName);
+        console.error(err);
+        return res.status(500).send("Internal Server Error: video processing failed");
 
     }
-);
+    
+
+    //uploading the processed video to the bucket
+    await uploadProcessedVideo(outputFileName);
+    await cleanUp(inputFileName, outputFileName);
+
+    return res.status(200).send("Video processed successfully");    
+});
 
 const PORT = process.env.port || 3000; //Take the port from environment variable or use 2000 as default (important for deployment)
 
